@@ -6,10 +6,13 @@ const GAME_CONFIG = {
   START_SPEED: 380,
   MAX_SPEED: 680,
   SPEED_ACCELERATION: 6,
+  INITIAL_LIVES: 3,
   SPAWN_INTERVAL_MS: 950,
   COLORS: {
     CYAN: 0x00f5ff,
     MAGENTA: 0xff007f,
+    SPIKE: 0xff3b30,
+    STAR: 0xffd700,
     BG_DARK: 0x070b19,
     LANE_LINE: 0x1e293b,
     LANE_GLOW: 0x334155,
@@ -19,8 +22,8 @@ const GAME_CONFIG = {
 type Polarity = 'CYAN' | 'MAGENTA';
 
 interface GameItem {
-  type: 'ORB';
-  polarity: Polarity;
+  type: 'ORB' | 'SPIKE' | 'STAR';
+  polarity?: Polarity;
   lane: number;
   container: Phaser.GameObjects.Container;
   collected?: boolean;
@@ -160,6 +163,25 @@ class SoundEngine {
     osc.start(now);
     osc.stop(now + 0.21);
   }
+
+  playLifeUp(): void {
+    if (!this.ctx || this.isMuted) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const now = this.ctx.currentTime;
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(523.25, now);
+    osc.frequency.linearRampToValueAtTime(1046.5, now + 0.25);
+
+    gain.gain.setValueAtTime(0.25, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.26);
+  }
 }
 
 export class GameScene extends Phaser.Scene {
@@ -170,9 +192,11 @@ export class GameScene extends Phaser.Scene {
   private playerAura!: Phaser.GameObjects.Arc;
   private currentLane = 1;
   private currentPolarity: Polarity = 'CYAN';
+  private lives: number = GAME_CONFIG.INITIAL_LIVES;
   private score = 0;
   private combo = 0;
   private speed: number = GAME_CONFIG.START_SPEED;
+  private isGameOver = false;
 
   private items: GameItem[] = [];
   private spawnTimer = 0;
@@ -180,6 +204,7 @@ export class GameScene extends Phaser.Scene {
 
   private scoreText!: Phaser.GameObjects.Text;
   private comboText!: Phaser.GameObjects.Text;
+  private livesText!: Phaser.GameObjects.Text;
 
   constructor() {
     super('GameScene');
@@ -262,6 +287,12 @@ export class GameScene extends Phaser.Scene {
       fontStyle: 'bold',
       color: '#facc15',
     }).setOrigin(0.5, 0);
+
+    this.livesText = this.add.text(width - 28, 24, 'SHIELD: ❤️❤️❤️', {
+      fontFamily: 'system-ui, sans-serif',
+      fontSize: '22px',
+      color: '#ff007f',
+    }).setOrigin(1, 0);
   }
 
   private setupInput(): void {
@@ -269,6 +300,8 @@ export class GameScene extends Phaser.Scene {
 
     this.input.keyboard.on('keydown', (event: KeyboardEvent) => {
       this.soundEngine.init();
+      if (this.isGameOver) return;
+
       if (event.code === 'KeyW' || event.code === 'ArrowUp') {
         this.moveLane(-1);
       } else if (event.code === 'KeyS' || event.code === 'ArrowDown') {
@@ -290,7 +323,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private switchLaneTo(laneIdx: number): void {
-    if (laneIdx === this.currentLane) return;
+    if (laneIdx === this.currentLane || this.isGameOver) return;
     this.currentLane = laneIdx;
 
     this.tweens.add({
@@ -305,6 +338,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private togglePolarity(): void {
+    if (this.isGameOver) return;
     this.currentPolarity = this.currentPolarity === 'CYAN' ? 'MAGENTA' : 'CYAN';
     this.updatePlayerVisuals();
     this.soundEngine.playSwitch();
@@ -344,6 +378,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
+    if (this.isGameOver) return;
     const dt = delta / 1000;
 
     this.stars.forEach((star) => {
@@ -361,7 +396,7 @@ export class GameScene extends Phaser.Scene {
     this.spawnTimer += delta;
     if (this.spawnTimer > GAME_CONFIG.SPAWN_INTERVAL_MS) {
       this.spawnTimer = 0;
-      this.spawnOrb();
+      this.spawnTraffic();
     }
 
     for (let i = this.items.length - 1; i >= 0; i--) {
@@ -369,7 +404,7 @@ export class GameScene extends Phaser.Scene {
       item.container.x -= this.speed * dt;
 
       if (!item.collected && Math.abs(item.container.x - GAME_CONFIG.PLAYER_X) < 36 && item.lane === this.currentLane) {
-        this.handleCollect(item);
+        this.handleCollision(item);
       }
 
       if (item.container.x < -60) {
@@ -379,11 +414,22 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private spawnOrb(): void {
+  private spawnTraffic(): void {
     const lane = Phaser.Math.Between(0, 2);
-    const polarity: Polarity = Math.random() < 0.5 ? 'CYAN' : 'MAGENTA';
-    const color = polarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA;
+    const rand = Math.random();
 
+    if (rand < 0.65) {
+      const polarity: Polarity = Math.random() < 0.5 ? 'CYAN' : 'MAGENTA';
+      this.spawnOrb(lane, polarity);
+    } else if (rand < 0.90) {
+      this.spawnSpike(lane);
+    } else {
+      this.spawnStar(lane);
+    }
+  }
+
+  private spawnOrb(lane: number, polarity: Polarity): void {
+    const color = polarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA;
     const cont = this.add.container(this.scale.width + 40, GAME_CONFIG.LANES_Y[lane]);
     const outer = this.add.circle(0, 0, 22, color, 0.3);
     const core = this.add.circle(0, 0, 14, color, 1);
@@ -399,27 +445,82 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
-  private handleCollect(item: GameItem): void {
+  private spawnSpike(lane: number): void {
+    const cont = this.add.container(this.scale.width + 40, GAME_CONFIG.LANES_Y[lane]);
+    const spike = this.add.triangle(0, 0, -18, 18, 0, -18, 18, 18, GAME_CONFIG.COLORS.SPIKE);
+    spike.setStrokeStyle(2, 0xffffff, 0.9);
+    cont.add(spike);
+
+    this.tweens.add({
+      targets: spike,
+      angle: 360,
+      duration: 1200,
+      repeat: -1,
+    });
+
+    this.items.push({
+      type: 'SPIKE',
+      lane,
+      container: cont,
+    });
+  }
+
+  private spawnStar(lane: number): void {
+    const cont = this.add.container(this.scale.width + 40, GAME_CONFIG.LANES_Y[lane]);
+    const starGlow = this.add.circle(0, 0, 24, GAME_CONFIG.COLORS.STAR, 0.4);
+    const star = this.add.star(0, 0, 5, 8, 18, GAME_CONFIG.COLORS.STAR);
+    cont.add([starGlow, star]);
+
+    this.items.push({
+      type: 'STAR',
+      lane,
+      container: cont,
+    });
+  }
+
+  private handleCollision(item: GameItem): void {
     item.collected = true;
 
-    if (item.polarity === this.currentPolarity) {
-      this.combo += 1;
-      const multiplier = Math.min(8, 1 + Math.floor(this.combo / 4));
-      const gain = 100 * multiplier;
-      this.score += gain;
+    if (item.type === 'ORB') {
+      if (item.polarity === this.currentPolarity) {
+        this.combo += 1;
+        const multiplier = Math.min(8, 1 + Math.floor(this.combo / 4));
+        const gain = 100 * multiplier;
+        this.score += gain;
 
-      this.showFloatingText(item.container.x, item.container.y, `+${gain}`, 0x00f5ff);
-      this.createParticles(item.container.x, item.container.y, item.polarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA);
-      this.soundEngine.playCollect(this.combo);
-    } else {
-      this.combo = 0;
-      this.soundEngine.playHit();
-      this.cameras.main.shake(180, 0.012);
-      this.showFloatingText(this.playerContainer.x, this.playerContainer.y - 30, 'POLARITY MISMATCH!', 0xff3b30);
+        this.showFloatingText(item.container.x, item.container.y, `+${gain}`, 0x00f5ff);
+        this.createParticles(item.container.x, item.container.y, item.polarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA);
+        this.soundEngine.playCollect(this.combo);
+      } else {
+        this.takeDamage('POLARITY MISMATCH!');
+      }
+    } else if (item.type === 'SPIKE') {
+      this.takeDamage('HAZARD HIT!');
+    } else if (item.type === 'STAR') {
+      this.lives = Math.min(3, this.lives + 1);
+      this.score += 500;
+      this.showFloatingText(item.container.x, item.container.y, '+500 SHIELD REPAIRED', 0xffd700);
+      this.createParticles(item.container.x, item.container.y, GAME_CONFIG.COLORS.STAR, 16);
+      this.soundEngine.playLifeUp();
     }
 
     item.container.destroy();
     this.updateHUD();
+  }
+
+  private takeDamage(reason: string): void {
+    this.lives -= 1;
+    this.combo = 0;
+    this.soundEngine.playHit();
+    this.cameras.main.shake(200, 0.015);
+
+    this.showFloatingText(this.playerContainer.x, this.playerContainer.y - 30, reason, 0xff3b30);
+    this.createParticles(this.playerContainer.x, this.playerContainer.y, 0xff3b30, 20);
+
+    if (this.lives <= 0) {
+      this.isGameOver = true;
+      this.soundEngine.stopBeat();
+    }
   }
 
   private showFloatingText(x: number, y: number, message: string, colorHex: number): void {
@@ -440,8 +541,8 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
-  private createParticles(x: number, y: number, color: number): void {
-    for (let i = 0; i < 12; i++) {
+  private createParticles(x: number, y: number, color: number, count = 12): void {
+    for (let i = 0; i < count; i++) {
       const p = this.add.circle(x, y, Phaser.Math.Between(3, 6), color, 0.9);
       const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
       const dist = Phaser.Math.Between(30, 90);
@@ -463,5 +564,7 @@ export class GameScene extends Phaser.Scene {
     this.scoreText.setText(`SCORE: ${this.score}`);
     const mult = Math.min(8, 1 + Math.floor(this.combo / 4));
     this.comboText.setText(`COMBO x${mult} (${this.combo})`);
+    const hearts = '❤️'.repeat(Math.max(0, this.lives)) + '🖤'.repeat(Math.max(0, 3 - this.lives));
+    this.livesText.setText(`SHIELD: ${hearts}`);
   }
 }
