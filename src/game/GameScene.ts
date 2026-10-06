@@ -8,7 +8,7 @@ const GAME_CONFIG = {
   MAX_SPEED: 700,
   SPEED_ACCELERATION: 6,
   INITIAL_LIVES: 3,
-  SPAWN_INTERVAL_MS: 950,
+  SPAWN_INTERVAL_MS: 620, // Ускоренный динамичный поток объектов (было 950)
   HEALTH_COOLDOWN_MS: 14000, // Кулдаун на аптечки (14 секунд)
   COLORS: {
     CYAN: 0x00f5ff,
@@ -24,11 +24,15 @@ const GAME_CONFIG = {
 type Polarity = 'CYAN' | 'MAGENTA';
 
 interface GameItem {
-  type: 'ORB' | 'SPIKE' | 'HEALTH';
+  type: 'ORB' | 'SPIKE' | 'HEALTH' | 'BEAM';
   polarity?: Polarity;
   lane: number;
   container: Phaser.GameObjects.Container;
   collected?: boolean;
+  beamLength?: number;
+  isHolding?: boolean;
+  holdAccumulator?: number;
+  perfectFinished?: boolean;
 }
 
 interface AudioMetrics {
@@ -299,6 +303,44 @@ class SoundEngine {
     gain.connect(this.ctx.destination);
     osc.start(now);
     osc.stop(now + 0.26);
+  }
+
+  playHoldTick(): void {
+    if (!this.ctx || this.isMuted) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const now = this.ctx.currentTime;
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(580, now);
+    osc.frequency.linearRampToValueAtTime(720, now + 0.05);
+
+    gain.gain.setValueAtTime(0.06, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.06);
+  }
+
+  playHoldFinish(): void {
+    if (!this.ctx || this.isMuted) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const now = this.ctx.currentTime;
+
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(523.25, now);
+    osc.frequency.exponentialRampToValueAtTime(1046.5, now + 0.22);
+
+    gain.gain.setValueAtTime(0.28, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.23);
   }
 }
 
@@ -818,20 +860,20 @@ export class GameScene extends Phaser.Scene {
       this.speed += GAME_CONFIG.SPEED_ACCELERATION * dt;
     }
 
-    // 5. Спавн объектов: синхронизированный с битом для своей музыки
+    // 5. Спавн объектов: непрерывный динамичный поток + бит-дропы
     const now = this.time.now;
-    if (this.soundEngine.isCustomAudio) {
-      if (metrics.isBeat && now - this.lastBeatSpawnTime > 400) {
+    this.spawnTimer += delta;
+    const currentSpawnInterval = Math.max(380, GAME_CONFIG.SPAWN_INTERVAL_MS - (this.speed - GAME_CONFIG.START_SPEED) * 0.55);
+
+    // Дополнительный импульс на пиках баса музыки
+    const isBeatDrop = this.soundEngine.isCustomAudio && metrics.isBeat && (now - this.lastBeatSpawnTime > 340);
+
+    if (this.spawnTimer > currentSpawnInterval || isBeatDrop) {
+      this.spawnTimer = 0;
+      if (isBeatDrop) {
         this.lastBeatSpawnTime = now;
-        this.spawnTraffic(now);
       }
-    } else {
-      this.spawnTimer += delta;
-      const currentSpawnInterval = Math.max(500, GAME_CONFIG.SPAWN_INTERVAL_MS - (this.speed - GAME_CONFIG.START_SPEED) * 0.8);
-      if (this.spawnTimer > currentSpawnInterval) {
-        this.spawnTimer = 0;
-        this.spawnTraffic(now);
-      }
+      this.spawnTraffic(now);
     }
 
     // 6. Движение и коллизии
@@ -839,18 +881,24 @@ export class GameScene extends Phaser.Scene {
       const item = this.items[i];
       item.container.x -= this.speed * dt;
 
-      if (!item.collected && Math.abs(item.container.x - GAME_CONFIG.PLAYER_X) < 36 && item.lane === this.currentLane) {
-        this.handleCollision(item);
+      if (item.type === 'BEAM') {
+        this.updateHoldBeam(item, dt);
+      } else {
+        if (!item.collected && Math.abs(item.container.x - GAME_CONFIG.PLAYER_X) < 36 && item.lane === this.currentLane) {
+          this.handleCollision(item);
+        }
       }
 
-      if (item.container.x < -60) {
+      // Удаление объектов за левым краем
+      const rightEdge = item.container.x + (item.beamLength || 0);
+      if (rightEdge < -60) {
         item.container.destroy();
         this.items.splice(i, 1);
       }
     }
   }
 
-  /** Генерация встречных объектов с кулдауном на жизни */
+  /** Генерация встречных объектов с кулдауном на жизни и долгими лучами */
   private spawnTraffic(now: number): void {
     const lane = Phaser.Math.Between(0, 2);
 
@@ -865,11 +913,128 @@ export class GameScene extends Phaser.Scene {
     }
 
     const rand = Math.random();
-    if (rand < 0.68) {
+    if (rand < 0.25) {
+      // 25% "Долгие" очки (Hold Beam)
+      const polarity: Polarity = Math.random() < 0.5 ? 'CYAN' : 'MAGENTA';
+      this.spawnHoldBeam(lane, polarity, Phaser.Math.Between(260, 360));
+    } else if (rand < 0.65) {
+      // 40% Обычная сфера ритма (Циан или Маджента)
       const polarity: Polarity = Math.random() < 0.5 ? 'CYAN' : 'MAGENTA';
       this.spawnOrb(lane, polarity);
     } else {
+      // 35% Опасный шип
       this.spawnSpike(lane);
+    }
+
+    // При быстром движении иногда спавним дополнительный объект на соседней полосе
+    if (Math.random() < 0.35 && rand >= 0.25) {
+      const otherLane = (lane + Phaser.Math.Between(1, 2)) % 3;
+      if (Math.random() < 0.5) {
+        this.spawnSpike(otherLane);
+      } else {
+        const otherPolarity: Polarity = Math.random() < 0.5 ? 'CYAN' : 'MAGENTA';
+        this.spawnOrb(otherLane, otherPolarity);
+      }
+    }
+  }
+
+  /** Создание длинного луча ("долгие очки") */
+  private spawnHoldBeam(lane: number, polarity: Polarity, length: number): void {
+    const color = polarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA;
+    const cont = this.add.container(this.scale.width + 40, GAME_CONFIG.LANES_Y[lane]);
+
+    // Светящаяся лента
+    const beamOuter = this.add.rectangle(length / 2, 0, length, 24, color, 0.25);
+    const beamCore = this.add.rectangle(length / 2, 0, length, 10, color, 0.7);
+    const beamLine = this.add.rectangle(length / 2, 0, length, 3, 0xffffff, 0.95);
+
+    // Головная сфера
+    const headOuter = this.add.circle(0, 0, 20, color, 0.4);
+    const headCore = this.add.circle(0, 0, 13, color, 1);
+    const headInner = this.add.circle(0, 0, 6, 0xffffff, 1);
+
+    // Хвостовая финишная звезда
+    const tailGlow = this.add.circle(length, 0, 18, color, 0.5);
+    const tailStar = this.add.star(length, 0, 4, 6, 12, 0xffffff);
+
+    cont.add([beamOuter, beamCore, beamLine, headOuter, headCore, headInner, tailGlow, tailStar]);
+
+    this.tweens.add({
+      targets: [beamOuter, beamCore],
+      alpha: 0.4,
+      duration: 180,
+      yoyo: true,
+      repeat: -1,
+    });
+
+    this.items.push({
+      type: 'BEAM',
+      polarity,
+      lane,
+      container: cont,
+      beamLength: length,
+      isHolding: false,
+      holdAccumulator: 0,
+      perfectFinished: false,
+    });
+  }
+
+  /** Логика взаимодействия с долгим лучом */
+  private updateHoldBeam(item: GameItem, dt: number): void {
+    const playerX = GAME_CONFIG.PLAYER_X;
+    const headX = item.container.x;
+    const tailX = item.container.x + (item.beamLength || 0);
+
+    const isOverPlayer = headX <= playerX && tailX >= playerX;
+
+    if (isOverPlayer) {
+      const isCorrectLane = item.lane === this.currentLane;
+      const isCorrectColor = item.polarity === this.currentPolarity;
+
+      if (isCorrectLane && isCorrectColor) {
+        // Успешное удержание луча!
+        item.isHolding = true;
+        item.holdAccumulator = (item.holdAccumulator || 0) + dt;
+
+        if (item.holdAccumulator >= 0.08) {
+          item.holdAccumulator -= 0.08;
+          const mult = Math.min(8, 1 + Math.floor(this.combo / 4));
+          const tickGain = 20 * mult;
+          this.score += tickGain;
+          this.combo += 1;
+          this.updateHUD();
+
+          this.soundEngine.playHoldTick();
+          this.createParticles(playerX, this.playerContainer.y, item.polarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA, 3);
+          this.punchScoreCounter(item.polarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA);
+        }
+      } else if (isCorrectLane && !isCorrectColor) {
+        // Неправильный цвет на луче
+        item.isHolding = false;
+        this.takeDamage('POLARITY MISMATCH!');
+      } else {
+        // Игрок соскочил с полосы
+        if (item.isHolding) {
+          item.isHolding = false;
+          this.showFloatingText(playerX, this.playerContainer.y - 30, 'HOLD BROKEN!', 0x94a3b8);
+        }
+      }
+    } else if (headX < playerX && tailX < playerX && !item.perfectFinished) {
+      // Финиш луча
+      if (item.isHolding) {
+        item.perfectFinished = true;
+        item.isHolding = false;
+        const mult = Math.min(8, 1 + Math.floor(this.combo / 4));
+        const bonusGain = 500 * mult;
+        this.score += bonusGain;
+
+        this.soundEngine.playHoldFinish();
+        this.showFloatingText(playerX, this.playerContainer.y - 45, `⚡ PERFECT HOLD! +${bonusGain}`, 0xfacc15);
+        this.animateFlyingScore(playerX, this.playerContainer.y, bonusGain, 0xfacc15);
+        this.createParticles(playerX, this.playerContainer.y, 0xfacc15, 22);
+        this.punchScoreCounter(0xfacc15);
+        this.updateHUD();
+      }
     }
   }
 
@@ -952,8 +1117,9 @@ export class GameScene extends Phaser.Scene {
         const gain = 100 * multiplier;
         this.score += gain;
 
-        this.showFloatingText(item.container.x, item.container.y, `+${gain}`, 0x00f5ff);
-        this.createParticles(item.container.x, item.container.y, item.polarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA);
+        const orbColor = item.polarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA;
+        this.animateFlyingScore(item.container.x, item.container.y, gain, orbColor);
+        this.createParticles(item.container.x, item.container.y, orbColor);
         this.soundEngine.playCollect(this.combo);
       } else {
         this.takeDamage('POLARITY MISMATCH!');
@@ -963,13 +1129,87 @@ export class GameScene extends Phaser.Scene {
     } else if (item.type === 'HEALTH') {
       this.lives = Math.min(GAME_CONFIG.INITIAL_LIVES, this.lives + 1);
       this.score += 300;
-      this.showFloatingText(item.container.x, item.container.y, '+1 SHIELD REPAIRED', 0x10b981);
+      this.animateFlyingScore(item.container.x, item.container.y, 300, GAME_CONFIG.COLORS.HEALTH);
+      this.showFloatingText(this.playerContainer.x, this.playerContainer.y - 30, '+1 SHIELD REPAIRED', 0x10b981);
       this.createParticles(item.container.x, item.container.y, GAME_CONFIG.COLORS.HEALTH, 16);
       this.soundEngine.playLifeUp();
     }
 
     item.container.destroy();
     this.updateHUD();
+  }
+
+  /** Анимация улетающих очков в счетчик Score */
+  private animateFlyingScore(startX: number, startY: number, gain: number, colorHex: number): void {
+    const targetX = 110;
+    const targetY = 38;
+
+    const flyText = this.add.text(startX, startY, `+${gain}`, {
+      fontFamily: 'system-ui, sans-serif',
+      fontSize: '24px',
+      fontStyle: 'bold',
+      color: '#' + colorHex.toString(16).padStart(6, '0'),
+    }).setOrigin(0.5);
+
+    // Подпрыгивание и стремительный полет прямо в счетчик SCORE
+    this.tweens.add({
+      targets: flyText,
+      scale: 1.35,
+      y: startY - 25,
+      duration: 120,
+      ease: 'Quad.easeOut',
+      onComplete: () => {
+        this.tweens.add({
+          targets: flyText,
+          x: targetX,
+          y: targetY,
+          scale: 0.5,
+          alpha: 0.9,
+          duration: 380,
+          ease: 'Cubic.easeIn',
+          onComplete: () => {
+            flyText.destroy();
+            this.punchScoreCounter(colorHex);
+          },
+        });
+      },
+    });
+  }
+
+  /** Сочный Punch-эффект отдачи и вспышки на счетчике SCORE */
+  private punchScoreCounter(colorHex: number): void {
+    this.tweens.killTweensOf(this.scoreText);
+    this.scoreText.setScale(1.4);
+    this.scoreText.setColor('#ffffff');
+
+    this.tweens.add({
+      targets: this.scoreText,
+      scale: 1.0,
+      duration: 240,
+      ease: 'Back.easeOut',
+      onComplete: () => {
+        this.scoreText.setColor('#00f5ff');
+        this.scoreText.setScale(1.0);
+      },
+    });
+
+    // Всплеск неоновых искр из счетчика
+    for (let i = 0; i < 8; i++) {
+      const p = this.add.circle(110, 38, Phaser.Math.Between(2, 4), colorHex, 1);
+      const angle = Phaser.Math.FloatBetween(-Math.PI * 0.2, Math.PI * 0.8);
+      const dist = Phaser.Math.Between(15, 45);
+
+      this.tweens.add({
+        targets: p,
+        x: p.x + Math.cos(angle) * dist,
+        y: p.y + Math.sin(angle) * dist,
+        alpha: 0,
+        scale: 0.1,
+        duration: 280,
+        ease: 'Quad.easeOut',
+        onComplete: () => p.destroy(),
+      });
+    }
   }
 
   private takeDamage(reason: string): void {
