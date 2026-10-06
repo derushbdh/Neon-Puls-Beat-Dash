@@ -1,20 +1,28 @@
 import Phaser from 'phaser';
 
-const PLAYER_SPEED = 260;
+const GAME_CONFIG = {
+  LANES_Y: [220, 340, 460],
+  PLAYER_X: 180,
+  START_SPEED: 380,
+  COLORS: {
+    CYAN: 0x00f5ff,
+    MAGENTA: 0xff007f,
+    BG_DARK: 0x070b19,
+    LANE_LINE: 0x1e293b,
+    LANE_GLOW: 0x334155,
+  },
+} as const;
 
 /**
- * Минимальная рабочая сцена курса.
- *
- * Здесь намеренно почти нет "игры": квадрат двигается, круг можно собирать,
- * растёт счёт. Задача студента — превратить этот каркас в собственную игру.
+ * Игровая сцена: 3-полосная трасса и перемещение импульса
  */
 export class GameScene extends Phaser.Scene {
-  private player!: Phaser.GameObjects.Rectangle;
-  private target!: Phaser.GameObjects.Arc;
-  private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
-  private wasd!: Record<'up' | 'down' | 'left' | 'right', Phaser.Input.Keyboard.Key>;
-  private scoreText!: Phaser.GameObjects.Text;
-  private score = 0;
+  private playerContainer!: Phaser.GameObjects.Container;
+  private playerCore!: Phaser.GameObjects.Arc;
+  private playerRing!: Phaser.GameObjects.Arc;
+  private playerAura!: Phaser.GameObjects.Arc;
+  private currentLane = 1;
+  private stars: Phaser.GameObjects.Arc[] = [];
 
   constructor() {
     super('GameScene');
@@ -23,86 +31,100 @@ export class GameScene extends Phaser.Scene {
   create(): void {
     const { width, height } = this.scale;
 
-    this.add
-      .text(width / 2, 28, 'GAME DEV STARTER', {
-        fontFamily: 'system-ui, sans-serif',
-        fontSize: '28px',
-        color: '#ffffff',
-      })
-      .setOrigin(0.5, 0);
+    this.createBackground(width, height);
+    this.createLanes(width);
+    this.createPlayer();
+    this.setupInput();
+  }
 
-    this.add
-      .text(width / 2, 68, 'Стрелки / WASD — движение. Остальное придумай сам.', {
-        fontFamily: 'system-ui, sans-serif',
-        fontSize: '18px',
-        color: '#cbd5e1',
-      })
-      .setOrigin(0.5, 0);
+  private createBackground(width: number, height: number): void {
+    this.add.rectangle(width / 2, height / 2, width, height, GAME_CONFIG.COLORS.BG_DARK);
 
-    this.player = this.add.rectangle(width / 2, height / 2, 42, 42, 0x38bdf8);
-    this.target = this.add.circle(width * 0.72, height * 0.52, 18, 0xfacc15);
-
-    this.scoreText = this.add.text(24, height - 48, 'Score: 0', {
-      fontFamily: 'system-ui, sans-serif',
-      fontSize: '22px',
-      color: '#ffffff',
-    });
-
-    if (!this.input.keyboard) {
-      throw new Error('Keyboard input is unavailable.');
+    for (let i = 0; i < 60; i++) {
+      const star = this.add.circle(
+        Phaser.Math.Between(0, width),
+        Phaser.Math.Between(0, height),
+        Phaser.Math.FloatBetween(1, 2.5),
+        0xffffff,
+        Phaser.Math.FloatBetween(0.2, 0.7)
+      );
+      this.stars.push(star);
     }
+  }
 
-    this.cursors = this.input.keyboard.createCursorKeys();
-    this.wasd = this.input.keyboard.addKeys({
-      up: Phaser.Input.Keyboard.KeyCodes.W,
-      down: Phaser.Input.Keyboard.KeyCodes.S,
-      left: Phaser.Input.Keyboard.KeyCodes.A,
-      right: Phaser.Input.Keyboard.KeyCodes.D,
-    }) as Record<'up' | 'down' | 'left' | 'right', Phaser.Input.Keyboard.Key>;
+  private createLanes(width: number): void {
+    GAME_CONFIG.LANES_Y.forEach((laneY, idx) => {
+      const g = this.add.graphics();
+      g.lineStyle(2, GAME_CONFIG.COLORS.LANE_LINE, 0.6);
+      g.lineBetween(0, laneY, width, laneY);
+      g.lineStyle(10, GAME_CONFIG.COLORS.LANE_GLOW, 0.1);
+      g.lineBetween(0, laneY, width, laneY);
+
+      const zone = this.add.zone(width / 2, laneY, width, 100).setOrigin(0.5);
+      zone.setInteractive({ useHandCursor: true });
+      zone.on('pointerdown', () => this.switchLaneTo(idx));
+    });
+  }
+
+  private createPlayer(): void {
+    this.playerContainer = this.add.container(
+      GAME_CONFIG.PLAYER_X,
+      GAME_CONFIG.LANES_Y[this.currentLane]
+    );
+
+    this.playerAura = this.add.circle(0, 0, 36, GAME_CONFIG.COLORS.CYAN, 0.25);
+    this.playerRing = this.add.circle(0, 0, 24, GAME_CONFIG.COLORS.CYAN, 0.5);
+    this.playerCore = this.add.circle(0, 0, 14, 0xffffff, 1);
+
+    this.playerContainer.add([this.playerAura, this.playerRing, this.playerCore]);
+
+    this.tweens.add({
+      targets: this.playerAura,
+      scale: 1.3,
+      alpha: 0.1,
+      duration: 500,
+      yoyo: true,
+      repeat: -1,
+    });
+  }
+
+  private setupInput(): void {
+    if (!this.input.keyboard) return;
+
+    this.input.keyboard.on('keydown', (event: KeyboardEvent) => {
+      if (event.code === 'KeyW' || event.code === 'ArrowUp') {
+        this.moveLane(-1);
+      } else if (event.code === 'KeyS' || event.code === 'ArrowDown') {
+        this.moveLane(1);
+      }
+    });
+  }
+
+  private moveLane(delta: number): void {
+    const target = Phaser.Math.Clamp(this.currentLane + delta, 0, GAME_CONFIG.LANES_Y.length - 1);
+    this.switchLaneTo(target);
+  }
+
+  private switchLaneTo(laneIdx: number): void {
+    if (laneIdx === this.currentLane) return;
+    this.currentLane = laneIdx;
+
+    this.tweens.add({
+      targets: this.playerContainer,
+      y: GAME_CONFIG.LANES_Y[this.currentLane],
+      duration: 120,
+      ease: 'Cubic.easeOut',
+    });
   }
 
   update(_time: number, delta: number): void {
-    const seconds = delta / 1000;
-    let dx = 0;
-    let dy = 0;
-
-    if (this.cursors.left.isDown || this.wasd.left.isDown) dx -= 1;
-    if (this.cursors.right.isDown || this.wasd.right.isDown) dx += 1;
-    if (this.cursors.up.isDown || this.wasd.up.isDown) dy -= 1;
-    if (this.cursors.down.isDown || this.wasd.down.isDown) dy += 1;
-
-    if (dx !== 0 || dy !== 0) {
-      const length = Math.hypot(dx, dy);
-      this.player.x += (dx / length) * PLAYER_SPEED * seconds;
-      this.player.y += (dy / length) * PLAYER_SPEED * seconds;
-    }
-
-    this.keepPlayerOnScreen();
-    this.checkTarget();
-  }
-
-  private keepPlayerOnScreen(): void {
-    const half = this.player.width / 2;
-    this.player.x = Phaser.Math.Clamp(this.player.x, half, this.scale.width - half);
-    this.player.y = Phaser.Math.Clamp(this.player.y, 110 + half, this.scale.height - half);
-  }
-
-  private checkTarget(): void {
-    const distance = Phaser.Math.Distance.Between(
-      this.player.x,
-      this.player.y,
-      this.target.x,
-      this.target.y,
-    );
-
-    if (distance > 42) return;
-
-    this.score += 1;
-    this.scoreText.setText(`Score: ${this.score}`);
-
-    this.target.setPosition(
-      Phaser.Math.Between(60, this.scale.width - 60),
-      Phaser.Math.Between(140, this.scale.height - 80),
-    );
+    const dt = delta / 1000;
+    this.stars.forEach((star) => {
+      star.x -= GAME_CONFIG.START_SPEED * 0.25 * dt;
+      if (star.x < 0) {
+        star.x = this.scale.width;
+        star.y = Phaser.Math.Between(0, this.scale.height);
+      }
+    });
   }
 }
