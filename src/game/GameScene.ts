@@ -13,8 +13,10 @@ const GAME_CONFIG = {
   },
 } as const;
 
+type Polarity = 'CYAN' | 'MAGENTA';
+
 /**
- * Игровая сцена: 3-полосная трасса и перемещение импульса
+ * Игровая сцена: 3-полосная трасса, перемещение и переключение полярности
  */
 export class GameScene extends Phaser.Scene {
   private playerContainer!: Phaser.GameObjects.Container;
@@ -22,6 +24,7 @@ export class GameScene extends Phaser.Scene {
   private playerRing!: Phaser.GameObjects.Arc;
   private playerAura!: Phaser.GameObjects.Arc;
   private currentLane = 1;
+  private currentPolarity: Polarity = 'CYAN';
   private stars: Phaser.GameObjects.Arc[] = [];
 
   constructor() {
@@ -35,6 +38,7 @@ export class GameScene extends Phaser.Scene {
     this.createLanes(width);
     this.createPlayer();
     this.setupInput();
+    this.updatePlayerVisuals();
   }
 
   private createBackground(width: number, height: number): void {
@@ -96,6 +100,8 @@ export class GameScene extends Phaser.Scene {
         this.moveLane(-1);
       } else if (event.code === 'KeyS' || event.code === 'ArrowDown') {
         this.moveLane(1);
+      } else if (event.code === 'Space' || event.code === 'KeyF' || event.code === 'KeyE') {
+        this.togglePolarity();
       }
     });
   }
@@ -114,6 +120,46 @@ export class GameScene extends Phaser.Scene {
       y: GAME_CONFIG.LANES_Y[this.currentLane],
       duration: 120,
       ease: 'Cubic.easeOut',
+    });
+
+    this.createGhostTrail();
+  }
+
+  private togglePolarity(): void {
+    this.currentPolarity = this.currentPolarity === 'CYAN' ? 'MAGENTA' : 'CYAN';
+    this.updatePlayerVisuals();
+
+    this.tweens.add({
+      targets: this.playerRing,
+      scale: 1.6,
+      duration: 100,
+      yoyo: true,
+    });
+  }
+
+  private updatePlayerVisuals(): void {
+    const color = this.currentPolarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA;
+    this.playerAura.setFillStyle(color, 0.3);
+    this.playerRing.setFillStyle(color, 0.75);
+  }
+
+  private createGhostTrail(): void {
+    const color = this.currentPolarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA;
+    const ghost = this.add.circle(
+      this.playerContainer.x,
+      this.playerContainer.y,
+      18,
+      color,
+      0.6
+    );
+
+    this.tweens.add({
+      targets: ghost,
+      alpha: 0,
+      scale: 0.2,
+      x: ghost.x - 40,
+      duration: 250,
+      onComplete: () => ghost.destroy(),
     });
   }
 
