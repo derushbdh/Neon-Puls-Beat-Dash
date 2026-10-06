@@ -4,6 +4,9 @@ const GAME_CONFIG = {
   LANES_Y: [220, 340, 460],
   PLAYER_X: 180,
   START_SPEED: 380,
+  MAX_SPEED: 680,
+  SPEED_ACCELERATION: 6,
+  SPAWN_INTERVAL_MS: 950,
   COLORS: {
     CYAN: 0x00f5ff,
     MAGENTA: 0xff007f,
@@ -15,7 +18,14 @@ const GAME_CONFIG = {
 
 type Polarity = 'CYAN' | 'MAGENTA';
 
-/** Встроенный легковесный звуковой синтезатор на Web Audio API */
+interface GameItem {
+  type: 'ORB';
+  polarity: Polarity;
+  lane: number;
+  container: Phaser.GameObjects.Container;
+  collected?: boolean;
+}
+
 class SoundEngine {
   private ctx: AudioContext | null = null;
   public isMuted = false;
@@ -150,30 +160,8 @@ class SoundEngine {
     osc.start(now);
     osc.stop(now + 0.21);
   }
-
-  playLifeUp(): void {
-    if (!this.ctx || this.isMuted) return;
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
-    const now = this.ctx.currentTime;
-
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(523.25, now);
-    osc.frequency.linearRampToValueAtTime(1046.5, now + 0.25);
-
-    gain.gain.setValueAtTime(0.25, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
-
-    osc.connect(gain);
-    gain.connect(this.ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.26);
-  }
 }
 
-/**
- * Игровая сцена: добавление SoundEngine
- */
 export class GameScene extends Phaser.Scene {
   private soundEngine = new SoundEngine();
   private playerContainer!: Phaser.GameObjects.Container;
@@ -182,7 +170,16 @@ export class GameScene extends Phaser.Scene {
   private playerAura!: Phaser.GameObjects.Arc;
   private currentLane = 1;
   private currentPolarity: Polarity = 'CYAN';
+  private score = 0;
+  private combo = 0;
+  private speed: number = GAME_CONFIG.START_SPEED;
+
+  private items: GameItem[] = [];
+  private spawnTimer = 0;
   private stars: Phaser.GameObjects.Arc[] = [];
+
+  private scoreText!: Phaser.GameObjects.Text;
+  private comboText!: Phaser.GameObjects.Text;
 
   constructor() {
     super('GameScene');
@@ -194,8 +191,10 @@ export class GameScene extends Phaser.Scene {
     this.createBackground(width, height);
     this.createLanes(width);
     this.createPlayer();
+    this.createHUD(width);
     this.setupInput();
     this.updatePlayerVisuals();
+    this.soundEngine.startBeat();
   }
 
   private createBackground(width: number, height: number): void {
@@ -247,6 +246,22 @@ export class GameScene extends Phaser.Scene {
       yoyo: true,
       repeat: -1,
     });
+  }
+
+  private createHUD(width: number): void {
+    this.scoreText = this.add.text(28, 24, 'SCORE: 0', {
+      fontFamily: 'system-ui, sans-serif',
+      fontSize: '26px',
+      fontStyle: 'bold',
+      color: '#00f5ff',
+    });
+
+    this.comboText = this.add.text(width / 2, 28, 'COMBO x1', {
+      fontFamily: 'system-ui, sans-serif',
+      fontSize: '24px',
+      fontStyle: 'bold',
+      color: '#facc15',
+    }).setOrigin(0.5, 0);
   }
 
   private setupInput(): void {
@@ -330,12 +345,123 @@ export class GameScene extends Phaser.Scene {
 
   update(_time: number, delta: number): void {
     const dt = delta / 1000;
+
     this.stars.forEach((star) => {
-      star.x -= GAME_CONFIG.START_SPEED * 0.25 * dt;
+      star.x -= this.speed * 0.25 * dt;
       if (star.x < 0) {
         star.x = this.scale.width;
         star.y = Phaser.Math.Between(0, this.scale.height);
       }
     });
+
+    if (this.speed < GAME_CONFIG.MAX_SPEED) {
+      this.speed += GAME_CONFIG.SPEED_ACCELERATION * dt;
+    }
+
+    this.spawnTimer += delta;
+    if (this.spawnTimer > GAME_CONFIG.SPAWN_INTERVAL_MS) {
+      this.spawnTimer = 0;
+      this.spawnOrb();
+    }
+
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const item = this.items[i];
+      item.container.x -= this.speed * dt;
+
+      if (!item.collected && Math.abs(item.container.x - GAME_CONFIG.PLAYER_X) < 36 && item.lane === this.currentLane) {
+        this.handleCollect(item);
+      }
+
+      if (item.container.x < -60) {
+        item.container.destroy();
+        this.items.splice(i, 1);
+      }
+    }
+  }
+
+  private spawnOrb(): void {
+    const lane = Phaser.Math.Between(0, 2);
+    const polarity: Polarity = Math.random() < 0.5 ? 'CYAN' : 'MAGENTA';
+    const color = polarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA;
+
+    const cont = this.add.container(this.scale.width + 40, GAME_CONFIG.LANES_Y[lane]);
+    const outer = this.add.circle(0, 0, 22, color, 0.3);
+    const core = this.add.circle(0, 0, 14, color, 1);
+    const inner = this.add.circle(0, 0, 6, 0xffffff, 0.9);
+
+    cont.add([outer, core, inner]);
+
+    this.items.push({
+      type: 'ORB',
+      polarity,
+      lane,
+      container: cont,
+    });
+  }
+
+  private handleCollect(item: GameItem): void {
+    item.collected = true;
+
+    if (item.polarity === this.currentPolarity) {
+      this.combo += 1;
+      const multiplier = Math.min(8, 1 + Math.floor(this.combo / 4));
+      const gain = 100 * multiplier;
+      this.score += gain;
+
+      this.showFloatingText(item.container.x, item.container.y, `+${gain}`, 0x00f5ff);
+      this.createParticles(item.container.x, item.container.y, item.polarity === 'CYAN' ? GAME_CONFIG.COLORS.CYAN : GAME_CONFIG.COLORS.MAGENTA);
+      this.soundEngine.playCollect(this.combo);
+    } else {
+      this.combo = 0;
+      this.soundEngine.playHit();
+      this.cameras.main.shake(180, 0.012);
+      this.showFloatingText(this.playerContainer.x, this.playerContainer.y - 30, 'POLARITY MISMATCH!', 0xff3b30);
+    }
+
+    item.container.destroy();
+    this.updateHUD();
+  }
+
+  private showFloatingText(x: number, y: number, message: string, colorHex: number): void {
+    const text = this.add.text(x, y, message, {
+      fontFamily: 'system-ui, sans-serif',
+      fontSize: '20px',
+      fontStyle: 'bold',
+      color: '#' + colorHex.toString(16).padStart(6, '0'),
+    }).setOrigin(0.5);
+
+    this.tweens.add({
+      targets: text,
+      y: y - 50,
+      alpha: 0,
+      duration: 650,
+      ease: 'Cubic.easeOut',
+      onComplete: () => text.destroy(),
+    });
+  }
+
+  private createParticles(x: number, y: number, color: number): void {
+    for (let i = 0; i < 12; i++) {
+      const p = this.add.circle(x, y, Phaser.Math.Between(3, 6), color, 0.9);
+      const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
+      const dist = Phaser.Math.Between(30, 90);
+
+      this.tweens.add({
+        targets: p,
+        x: x + Math.cos(angle) * dist,
+        y: y + Math.sin(angle) * dist,
+        alpha: 0,
+        scale: 0.1,
+        duration: Phaser.Math.Between(300, 500),
+        ease: 'Quad.easeOut',
+        onComplete: () => p.destroy(),
+      });
+    }
+  }
+
+  private updateHUD(): void {
+    this.scoreText.setText(`SCORE: ${this.score}`);
+    const mult = Math.min(8, 1 + Math.floor(this.combo / 4));
+    this.comboText.setText(`COMBO x${mult} (${this.combo})`);
   }
 }
