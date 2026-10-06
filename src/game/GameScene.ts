@@ -15,10 +15,167 @@ const GAME_CONFIG = {
 
 type Polarity = 'CYAN' | 'MAGENTA';
 
+/** Встроенный легковесный звуковой синтезатор на Web Audio API */
+class SoundEngine {
+  private ctx: AudioContext | null = null;
+  public isMuted = false;
+  private beatIntervalId: number | null = null;
+
+  init(): void {
+    if (!this.ctx && typeof window !== 'undefined') {
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (AudioCtx) {
+        this.ctx = new AudioCtx();
+      }
+    }
+    if (this.ctx && this.ctx.state === 'suspended') {
+      void this.ctx.resume();
+    }
+  }
+
+  startBeat(): void {
+    if (this.beatIntervalId !== null) return;
+    this.init();
+    let step = 0;
+    this.beatIntervalId = window.setInterval(() => {
+      if (this.isMuted || !this.ctx) return;
+      if (step % 2 === 0) {
+        this.playKick();
+      } else {
+        this.playHiHat();
+      }
+      step = (step + 1) % 4;
+    }, 240);
+  }
+
+  stopBeat(): void {
+    if (this.beatIntervalId !== null) {
+      clearInterval(this.beatIntervalId);
+      this.beatIntervalId = null;
+    }
+  }
+
+  private playKick(): void {
+    if (!this.ctx || this.isMuted) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const now = this.ctx.currentTime;
+
+    osc.frequency.setValueAtTime(130, now);
+    osc.frequency.exponentialRampToValueAtTime(32, now + 0.12);
+
+    gain.gain.setValueAtTime(0.3, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.13);
+  }
+
+  private playHiHat(): void {
+    if (!this.ctx || this.isMuted) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const now = this.ctx.currentTime;
+
+    osc.type = 'highpass' as unknown as OscillatorType;
+    osc.frequency.setValueAtTime(8000, now);
+
+    gain.gain.setValueAtTime(0.06, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.05);
+  }
+
+  playCollect(combo: number): void {
+    if (!this.ctx || this.isMuted) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const now = this.ctx.currentTime;
+
+    const notes = [440, 493.88, 554.37, 659.25, 739.99, 880];
+    const freq = notes[Math.min(combo, notes.length - 1)];
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, now);
+    osc.frequency.exponentialRampToValueAtTime(freq * 1.5, now + 0.15);
+
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.16);
+  }
+
+  playSwitch(): void {
+    if (!this.ctx || this.isMuted) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const now = this.ctx.currentTime;
+
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(300, now);
+    osc.frequency.exponentialRampToValueAtTime(600, now + 0.08);
+
+    gain.gain.setValueAtTime(0.15, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.09);
+  }
+
+  playHit(): void {
+    if (!this.ctx || this.isMuted) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const now = this.ctx.currentTime;
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(150, now);
+    osc.frequency.linearRampToValueAtTime(50, now + 0.2);
+
+    gain.gain.setValueAtTime(0.35, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.21);
+  }
+
+  playLifeUp(): void {
+    if (!this.ctx || this.isMuted) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const now = this.ctx.currentTime;
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(523.25, now);
+    osc.frequency.linearRampToValueAtTime(1046.5, now + 0.25);
+
+    gain.gain.setValueAtTime(0.25, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.26);
+  }
+}
+
 /**
- * Игровая сцена: 3-полосная трасса, перемещение и переключение полярности
+ * Игровая сцена: добавление SoundEngine
  */
 export class GameScene extends Phaser.Scene {
+  private soundEngine = new SoundEngine();
   private playerContainer!: Phaser.GameObjects.Container;
   private playerCore!: Phaser.GameObjects.Arc;
   private playerRing!: Phaser.GameObjects.Arc;
@@ -96,6 +253,7 @@ export class GameScene extends Phaser.Scene {
     if (!this.input.keyboard) return;
 
     this.input.keyboard.on('keydown', (event: KeyboardEvent) => {
+      this.soundEngine.init();
       if (event.code === 'KeyW' || event.code === 'ArrowUp') {
         this.moveLane(-1);
       } else if (event.code === 'KeyS' || event.code === 'ArrowDown') {
@@ -103,6 +261,11 @@ export class GameScene extends Phaser.Scene {
       } else if (event.code === 'Space' || event.code === 'KeyF' || event.code === 'KeyE') {
         this.togglePolarity();
       }
+    });
+
+    this.input.on('pointerdown', () => {
+      this.soundEngine.init();
+      this.soundEngine.startBeat();
     });
   }
 
@@ -123,11 +286,13 @@ export class GameScene extends Phaser.Scene {
     });
 
     this.createGhostTrail();
+    this.soundEngine.playSwitch();
   }
 
   private togglePolarity(): void {
     this.currentPolarity = this.currentPolarity === 'CYAN' ? 'MAGENTA' : 'CYAN';
     this.updatePlayerVisuals();
+    this.soundEngine.playSwitch();
 
     this.tweens.add({
       targets: this.playerRing,
